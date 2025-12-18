@@ -7,6 +7,7 @@ from glob import glob
 from datetime import timedelta
 import time
 from dotenv import load_dotenv
+import datetime
 
 load_dotenv() # Load variables from .env
 
@@ -120,9 +121,9 @@ def create_and_pause_campaign(name: str,
     advert_id = base_info["advertId"]
 
     # Пытаемся сразу поставить на паузу
-    resp_pause = pause_campaign(advert_id)
+    # resp_pause = pause_campaign(advert_id)
 
-    paused = (resp_pause.status_code == 200)
+    # paused = (resp_pause.status_code == 200)
 
     # Если WB не дал поставить на паузу (например, статус ещё 4),
     # можно по желанию сначала стартануть, потом снова пауза.
@@ -131,9 +132,9 @@ def create_and_pause_campaign(name: str,
         "advertId": advert_id,
         "name": base_info["name"],
         "nms": base_info["nms"],
-        "paused": paused,
-        "pause_status_code": resp_pause.status_code,
-        "pause_response_text": resp_pause.text,
+        # "paused": paused,
+        # "pause_status_code": resp_pause.status_code,
+        # "pause_response_text": resp_pause.text,
     }
 
     return result
@@ -155,8 +156,10 @@ df_all.drop([0], inplace=True)
 df_campaings = pd.read_excel("wb_promotion_campaigns_full.xlsx", engine='calamine')
 df_filtered = df_all[~df_all['Артикул WB'].isin(df_campaings['nms'])]
 
-for art in range(len(df_filtered[0:3750])):
-    campaign_nms = [int(df_filtered[0:3750].sample()['Артикул WB'].values[0])]
+CAMPAING_LIMIT = 2110
+
+for art in range(len(df_filtered[0:CAMPAING_LIMIT])):
+    campaign_nms = [int(df_filtered[0:CAMPAING_LIMIT].sample()['Артикул WB'].values[0])]
     campaign_mask = f"Тест seacat через API {campaign_nms}"
 
     info = create_and_pause_campaign(
@@ -169,6 +172,7 @@ for art in range(len(df_filtered[0:3750])):
     print(info)
     time.sleep(13) # 13 секунд ждём для след запроса
 
+print(f'{datetime.datetime.now()} - Новые {CAMPAING_LIMIT} кампании созданы\n')
 
 # if __name__ == "__main__":
 #     # Собираем все .xlsx файлы
