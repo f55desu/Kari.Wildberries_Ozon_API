@@ -74,11 +74,8 @@ def get_promotion_count_df(API_KEY: str) -> pd.DataFrame:
 # 2. Функция: /promotion/adverts → df_adv
 # -------------------------
 
-def get_promotion_adverts_df(
-    API_KEY: str,
-    df_count: pd.DataFrame,
-    params: dict | None = None
-) -> pd.DataFrame:
+def get_promotion_adverts_df(API_KEY: str, df_count: pd.DataFrame, params: dict | None = None,
+                             stop_event=None, ui_log=None) -> pd.DataFrame:
     """
     Берёт advertId из df_count, делает запросы /adv/v1/promotion/adverts чанками по 49,
     ретраит 429/5xx с увеличением задержки,
@@ -145,6 +142,10 @@ def get_promotion_adverts_df(
                     pass
         return out
 
+    if stop_event is not None and stop_event.is_set():
+        if ui_log: ui_log("⛔ Остановлено пользователем (до начала запросов).")
+        return pd.DataFrame()
+
     # --- основной проход по чанкам ---
     for chunk_idx in range(total_chunks):
         start = chunk_idx * chunk_size
@@ -155,6 +156,9 @@ def get_promotion_adverts_df(
         while True:
             attempt += 1
             try:
+                if stop_event is not None and stop_event.is_set():
+                    if ui_log: ui_log("⛔ Остановлено пользователем (во время выгрузки).")
+                    break
                 resp = session.post(
                     url_adverts,
                     headers=headers,
@@ -174,8 +178,13 @@ def get_promotion_adverts_df(
                         all_rows.extend(data_chunk)
                         ids_got = extract_returned_ids(data_chunk)
                         returned_ids |= ids_got
+                        # Принт в консоль
                         print(f"    got_objects={len(data_chunk)} got_unique_ids={len(ids_got)} "
                               f"total_unique_ids={len(returned_ids)}")
+                        # Принт в UI
+                        msg = f"[{chunk_idx}/{total_chunks}] got_unique={len(returned_ids)} / requested={total_ids}"
+                        if ui_log:
+                            ui_log(msg)
                     else:
                         print("    200 OK but empty list (no objects).")
 
@@ -269,11 +278,17 @@ def get_promotion_adverts_df(
         if col in df_adv.columns:
             df_adv[col] = pd.to_datetime(df_adv[col], errors="coerce")
 
+    # Принт в консоль
     print(f"[DF] rows={len(df_adv)} unique_advertId={df_adv['advertId'].nunique()} "
           f"unique_nms={(df_adv['nms'].nunique() if 'nms' in df_adv.columns else 'NA')}")
+    
+    # Принт в UI
+    msg = (f"[DF] rows={len(df_adv)} unique_advertId={df_adv['advertId'].nunique()} "
+       f"unique_nms={(df_adv['nms'].nunique() if 'nms' in df_adv.columns else 'NA')}")
+    if ui_log:
+        ui_log(msg)
 
     return df_adv
-
 
 # -------------------------
 # 3. Функция: объединение и подготовка финального df_final

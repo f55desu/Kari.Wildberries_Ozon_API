@@ -1,6 +1,10 @@
+__pycache__
 .env
 wb_campaigns.xlsx
 wb_promotion_campaigns_full.xlsx
 wb_promotion_campaigns_full_KZ.xlsx
 wb_promotion_campaigns_full_RU.xlsx
 Товары
+build
+dist
+WB Campaign Export.spec
