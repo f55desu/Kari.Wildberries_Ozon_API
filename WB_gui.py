@@ -5,7 +5,7 @@ from os import getenv
 from threading import Thread
 from threading import Event
 
-import Campaing_WB
+from wb_api import Campaing_WB
 
 from dotenv import load_dotenv
 
@@ -118,7 +118,7 @@ class ExportApp(tk.Tk):
             self.file_path_var.set(path)
 
     def _get_selected_types(self):
-        return [t for t, var in self.type_vars.items() if var.get()]
+        return [STATUS_MAP[t] for t, var in self.type_vars.items() if var.get()]
 
     def on_export_clicked(self):
         api_key = API_KEY
@@ -127,6 +127,7 @@ class ExportApp(tk.Tk):
             return
 
         selected_types = self._get_selected_types()
+        print(selected_types)
         if not selected_types:
             messagebox.showerror("Ошибка", "Выбери хотя бы один тип кампаний.")
             return
@@ -177,7 +178,7 @@ class ExportApp(tk.Tk):
                 return
 
             self._log("2/4 Фильтрую кампании по выбранным типам…")
-            df_count_filtered = df_count[df_count["type"].isin(selected_types)].copy()
+            df_count_filtered = df_count[df_count["status_name"].isin(selected_types)].copy()
 
             self._log(
                 f"Найдено кампаний (всего): {df_count['advertId'].nunique()} | "
