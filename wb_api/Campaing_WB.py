@@ -74,21 +74,25 @@ def get_promotion_count_df(API_KEY: str) -> pd.DataFrame:
 # 2. Функция: /promotion/adverts → df_adv
 # -------------------------
 
-def get_promotion_adverts_df(
-    API_KEY: str,
-    df_count: pd.DataFrame,
-    params: dict | None = None
-) -> pd.DataFrame:
+def get_promotion_adverts_df(API_KEY: str, df_count: pd.DataFrame, params: dict | None = None,
+                             stop_event=None, ui_log=None) -> pd.DataFrame:
     """
-    Берёт advertId из df_count, делает запросы /adv/v1/promotion/adverts чанками по 49,
+    Берёт advertId из df_count, делает запросы GET /api/advert/v2/adverts чанками по 50,
     ретраит 429/5xx с увеличением задержки,
     показывает прогресс,
     и в конце печатает контроль полноты (missing ids и распределение типов по missing).
+
+    Схема ответа v2 отличается от v1:
+      корень: {"adverts": [ {id, bid_type, status, settings{...}, nm_settings[...], timestamps{...}}, ... ]}
+    Здесь мы разворачиваем ответ в плоский DF с колонками, совместимыми с прежним кодом:
+      advertId, name, status, status_name, nms, createTime, startTime, endTime, changeTime,
+      plus новые: bid_type, payment_type, placement_recommendations, placement_search,
+                  subject_id, subject_name, bid_recommendations, bid_search.
     """
     if df_count.empty:
-        raise SystemExit("Нет advertId для запроса /promotion/adverts")
+        raise SystemExit("Нет advertId для запроса v2/adverts")
 
-    url_adverts = "https://advert-api.wildberries.ru/adv/v1/promotion/adverts"
+    url_adverts = "https://advert-api.wildberries.ru/api/advert/v2/adverts"
 
     if params is None:
         params = {}
@@ -101,12 +105,13 @@ def get_promotion_adverts_df(
     if total_ids == 0:
         return pd.DataFrame()
 
-    chunk_size = 49
+    # В v2 лимит 50 id на запрос (см. описание параметра ids в Swagger WB)
+    chunk_size = 50
     total_chunks = (total_ids + chunk_size - 1) // chunk_size
 
     print(f"[START] advertId total={total_ids}, chunks={total_chunks}, chunk_size={chunk_size}")
 
-    headers = {"Authorization": API_KEY, "Content-Type": "application/json"}
+    headers = {"Authorization": API_KEY}
     session = requests.Session()
 
     # Настройки ретраев/пауз
@@ -135,15 +140,9 @@ def get_promotion_adverts_df(
         s *= (1.0 + random.random() * 0.2)
         time.sleep(s)
 
-    def extract_returned_ids(data_list: list) -> set[int]:
-        out = set()
-        for obj in data_list:
-            if isinstance(obj, dict) and "advertId" in obj:
-                try:
-                    out.add(int(obj["advertId"]))
-                except Exception:
-                    pass
-        return out
+    if stop_event is not None and stop_event.is_set():
+        if ui_log: ui_log("⛔ Остановлено пользователем (до начала запросов).")
+        return pd.DataFrame()
 
     # --- основной проход по чанкам ---
     for chunk_idx in range(total_chunks):
@@ -151,15 +150,24 @@ def get_promotion_adverts_df(
         end = min(start + chunk_size, total_ids)
         chunk_ids = advert_ids[start:end]
 
+        # В v2 ids — это строка с id через запятую, передаётся в query
+        query = {"ids": ",".join(str(x) for x in chunk_ids)}
+        # дополнительные необязательные фильтры (statuses, payment_type), если переданы
+        for k, v in params.items():
+            if v is not None:
+                query[k] = v
+
         attempt = 0
         while True:
             attempt += 1
             try:
-                resp = session.post(
+                if stop_event is not None and stop_event.is_set():
+                    if ui_log: ui_log("⛔ Остановлено пользователем (во время выгрузки).")
+                    break
+                resp = session.get(
                     url_adverts,
                     headers=headers,
-                    params=params,
-                    json=chunk_ids,
+                    params=query,
                     timeout=60,
                 )
 
@@ -169,15 +177,27 @@ def get_promotion_adverts_df(
                 print(f"[{chunk_idx+1}/{total_chunks}] ids={len(chunk_ids)} attempt={attempt} status={code}")
 
                 if code == 200:
-                    data_chunk = resp.json()
-                    if isinstance(data_chunk, list) and data_chunk:
-                        all_rows.extend(data_chunk)
-                        ids_got = extract_returned_ids(data_chunk)
+                    body = resp.json() or {}
+                    adverts = body.get("adverts") if isinstance(body, dict) else None
+                    if isinstance(adverts, list) and adverts:
+                        all_rows.extend(adverts)
+                        ids_got = set()
+                        for obj in adverts:
+                            if isinstance(obj, dict) and "id" in obj:
+                                try:
+                                    ids_got.add(int(obj["id"]))
+                                except Exception:
+                                    pass
                         returned_ids |= ids_got
-                        print(f"    got_objects={len(data_chunk)} got_unique_ids={len(ids_got)} "
+                        # Принт в консоль
+                        print(f"    got_objects={len(adverts)} got_unique_ids={len(ids_got)} "
                               f"total_unique_ids={len(returned_ids)}")
+                        # Принт в UI
+                        msg = f"[{chunk_idx}/{total_chunks}] got_unique={len(returned_ids)} / requested={total_ids}"
+                        if ui_log:
+                            ui_log(msg)
                     else:
-                        print("    200 OK but empty list (no objects).")
+                        print("    200 OK but empty adverts (no objects).")
 
                     time.sleep(normal_sleep)
                     break
@@ -226,32 +246,61 @@ def get_promotion_adverts_df(
         return pd.DataFrame()
 
     # ----------------------------------------------------------
-    # Преобразуем объединённые данные в DataFrame (как раньше)
-    # НО не выкидываем строки без nms (оставим nms=None)
+    # v2 response -> плоский DataFrame.
+    # Имена колонок подобраны так, чтобы совпадать с прежней схемой v1
+    # (advertId, nms, status, createTime, startTime, endTime, changeTime, name).
+    # Строки без nm_settings не выкидываем — nms=None.
     # ----------------------------------------------------------
-    df_adv = pd.DataFrame(all_rows)
+    rows = []
+    for adv in all_rows:
+        if not isinstance(adv, dict):
+            continue
 
-    if "unitedParams" not in df_adv.columns:
-        df_adv["unitedParams"] = None
+        settings = adv.get("settings") or {}
+        placements = settings.get("placements") or {}
+        ts = adv.get("timestamps") or {}
+        nm_settings = adv.get("nm_settings") or []
 
-    df_adv = df_adv.explode("unitedParams", ignore_index=True)
+        base = {
+            "advertId": adv.get("id"),
+            "bid_type": adv.get("bid_type"),
+            "status": adv.get("status"),
+            "name": settings.get("name"),
+            "payment_type": settings.get("payment_type"),
+            "placement_recommendations": placements.get("recommendations"),
+            "placement_search": placements.get("search"),
+            "createTime": ts.get("created"),
+            "startTime": ts.get("started"),
+            "endTime": ts.get("deleted"),   # в v2 нет явного endTime; используем deleted
+            "changeTime": ts.get("updated"),
+        }
 
-    def extract_nms(up):
-        # если nms нет — оставляем строку
-        if isinstance(up, dict):
-            nms = up.get("nms", [])
-            if nms is None:
-                return [None]
-            if isinstance(nms, collections.abc.Iterable) and not isinstance(nms, (str, bytes)):
-                nms_list = list(nms)
-                return nms_list if nms_list else [None]
-            return [nms]
-        return [None]
+        if not nm_settings:
+            rows.append({
+                **base,
+                "nms": None,
+                "subject_id": None,
+                "subject_name": None,
+                "bid_recommendations": None,
+                "bid_search": None,
+            })
+            continue
 
-    df_adv["nms_list"] = df_adv["unitedParams"].apply(extract_nms)
-    df_adv = df_adv.explode("nms_list", ignore_index=True)
-    df_adv = df_adv.rename(columns={"nms_list": "nms"})
-    df_adv.drop(columns=["unitedParams"], inplace=True)
+        for nm in nm_settings:
+            if not isinstance(nm, dict):
+                continue
+            subj = nm.get("subject") or {}
+            bids = nm.get("bids_kopecks") or {}
+            rows.append({
+                **base,
+                "nms": nm.get("nm_id"),
+                "subject_id": subj.get("id"),
+                "subject_name": subj.get("name"),
+                "bid_recommendations": bids.get("recommendations"),
+                "bid_search": bids.get("search"),
+            })
+
+    df_adv = pd.DataFrame(rows)
 
     status_map = {
         -1: "удалена",
@@ -269,19 +318,66 @@ def get_promotion_adverts_df(
         if col in df_adv.columns:
             df_adv[col] = pd.to_datetime(df_adv[col], errors="coerce")
 
+    # Принт в консоль
     print(f"[DF] rows={len(df_adv)} unique_advertId={df_adv['advertId'].nunique()} "
           f"unique_nms={(df_adv['nms'].nunique() if 'nms' in df_adv.columns else 'NA')}")
 
-    return df_adv
+    # Принт в UI
+    msg = (f"[DF] rows={len(df_adv)} unique_advertId={df_adv['advertId'].nunique()} "
+       f"unique_nms={(df_adv['nms'].nunique() if 'nms' in df_adv.columns else 'NA')}")
+    if ui_log:
+        ui_log(msg)
 
+    return df_adv
 
 # -------------------------
 # 3. Функция: объединение и подготовка финального df_final
 # -------------------------
 
-def build_final_df(df_count: pd.DataFrame, df_adv: pd.DataFrame) -> pd.DataFrame:
+def _strip_timezones(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Снимает таймзоны со всех datetime-значений, сохраняя «настенное» время,
+    чтобы Excel мог записать файл.
+
+    Покрывает два случая:
+      1) колонки типа datetime64[ns, tz] (однородная таймзона);
+      2) object-колонки со смешанными смещениями (часть 'Z'/UTC, часть '+03:00'),
+         которые pandas хранит как объекты tz-aware Timestamp и которые
+         select_dtypes(['datetimetz']) НЕ ловит.
+    """
+    import datetime as _dt
+
+    def _strip_value(v):
+        if isinstance(v, pd.Timestamp):
+            return v.tz_localize(None) if v.tzinfo is not None else v
+        if isinstance(v, _dt.datetime) and v.tzinfo is not None:
+            return v.replace(tzinfo=None)
+        return v
+
+    for col in df.columns:
+        s = df[col]
+        # 1) однородные tz-aware колонки
+        if isinstance(s.dtype, pd.DatetimeTZDtype):
+            df[col] = s.dt.tz_localize(None)
+            continue
+        # 2) object-колонки, в которых могут лежать tz-aware Timestamp/datetime
+        if s.dtype == object:
+            has_tz = s.map(
+                lambda v: (isinstance(v, pd.Timestamp) and v.tzinfo is not None)
+                or (isinstance(v, _dt.datetime) and v.tzinfo is not None)
+            ).any()
+            if has_tz:
+                df[col] = s.map(_strip_value)
+
+    return df
+
+
+def build_final_df(df_count: pd.DataFrame, df_adv: pd.DataFrame,
+                   with_reference: bool = True, ui_log=None) -> pd.DataFrame:
     """
     Объединяет df_count и df_adv, убирает таймзоны и возвращает df_final.
+    Если with_reference=True — дополнительно подмешивает Справочник из SQL
+    по nms == [Артикул WB] (LEFT join).
     """
     df_final = df_adv.merge(
         df_count[["advertId", "status_name", "changeTime_count"]],
@@ -290,9 +386,15 @@ def build_final_df(df_count: pd.DataFrame, df_adv: pd.DataFrame) -> pd.DataFrame
         suffixes=("", "_from_count"),
     )
 
-    # Убираем таймзону у всех столбцов с tz-aware datetime
-    for col in df_final.select_dtypes(include=["datetimetz"]).columns:
-        df_final[col] = df_final[col].dt.tz_localize(None)
+    if with_reference:
+        try:
+            from wb_api import Goods_Dictionary
+        except ImportError:
+            import Goods_Dictionary
+        df_final = Goods_Dictionary.merge_reference(df_final, ui_log=ui_log)
+
+    # Снимаем таймзоны В КОНЦЕ (после всех merge) — иначе Excel не запишет файл
+    df_final = _strip_timezones(df_final)
 
     return df_final
 
