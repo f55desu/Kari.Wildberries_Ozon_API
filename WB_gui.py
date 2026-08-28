@@ -215,8 +215,8 @@ class ExportApp(tk.Tk):
                 f"unique_nms={(df_adv['nms'].nunique() if 'nms' in df_adv.columns else 'NA')}"
             )
 
-            self._log("4/4 Собираю финальный датафрейм и сохраняю Excel…")
-            df_final = Campaing_WB.build_final_df(df_count_filtered, df_adv)
+            self._log("4/4 Собираю финальный датафрейм, подмешиваю Справочник и сохраняю Excel…")
+            df_final = Campaing_WB.build_final_df(df_count_filtered, df_adv, ui_log=self._log)
 
             if self.stop_event.is_set():
                 self._log("Остановлено пользователем. Данные не сохраняю.")

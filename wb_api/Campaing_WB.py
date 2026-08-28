@@ -334,9 +334,50 @@ def get_promotion_adverts_df(API_KEY: str, df_count: pd.DataFrame, params: dict 
 # 3. Функция: объединение и подготовка финального df_final
 # -------------------------
 
-def build_final_df(df_count: pd.DataFrame, df_adv: pd.DataFrame) -> pd.DataFrame:
+def _strip_timezones(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Снимает таймзоны со всех datetime-значений, сохраняя «настенное» время,
+    чтобы Excel мог записать файл.
+
+    Покрывает два случая:
+      1) колонки типа datetime64[ns, tz] (однородная таймзона);
+      2) object-колонки со смешанными смещениями (часть 'Z'/UTC, часть '+03:00'),
+         которые pandas хранит как объекты tz-aware Timestamp и которые
+         select_dtypes(['datetimetz']) НЕ ловит.
+    """
+    import datetime as _dt
+
+    def _strip_value(v):
+        if isinstance(v, pd.Timestamp):
+            return v.tz_localize(None) if v.tzinfo is not None else v
+        if isinstance(v, _dt.datetime) and v.tzinfo is not None:
+            return v.replace(tzinfo=None)
+        return v
+
+    for col in df.columns:
+        s = df[col]
+        # 1) однородные tz-aware колонки
+        if isinstance(s.dtype, pd.DatetimeTZDtype):
+            df[col] = s.dt.tz_localize(None)
+            continue
+        # 2) object-колонки, в которых могут лежать tz-aware Timestamp/datetime
+        if s.dtype == object:
+            has_tz = s.map(
+                lambda v: (isinstance(v, pd.Timestamp) and v.tzinfo is not None)
+                or (isinstance(v, _dt.datetime) and v.tzinfo is not None)
+            ).any()
+            if has_tz:
+                df[col] = s.map(_strip_value)
+
+    return df
+
+
+def build_final_df(df_count: pd.DataFrame, df_adv: pd.DataFrame,
+                   with_reference: bool = True, ui_log=None) -> pd.DataFrame:
     """
     Объединяет df_count и df_adv, убирает таймзоны и возвращает df_final.
+    Если with_reference=True — дополнительно подмешивает Справочник из SQL
+    по nms == [Артикул WB] (LEFT join).
     """
     df_final = df_adv.merge(
         df_count[["advertId", "status_name", "changeTime_count"]],
@@ -345,9 +386,15 @@ def build_final_df(df_count: pd.DataFrame, df_adv: pd.DataFrame) -> pd.DataFrame
         suffixes=("", "_from_count"),
     )
 
-    # Убираем таймзону у всех столбцов с tz-aware datetime
-    for col in df_final.select_dtypes(include=["datetimetz"]).columns:
-        df_final[col] = df_final[col].dt.tz_localize(None)
+    if with_reference:
+        try:
+            from wb_api import Goods_Dictionary
+        except ImportError:
+            import Goods_Dictionary
+        df_final = Goods_Dictionary.merge_reference(df_final, ui_log=ui_log)
+
+    # Снимаем таймзоны В КОНЦЕ (после всех merge) — иначе Excel не запишет файл
+    df_final = _strip_timezones(df_final)
 
     return df_final
 
